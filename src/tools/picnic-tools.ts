@@ -58,15 +58,6 @@ function filterCartData(cart: unknown) {
     }
   })
 
-  // Summarize delivery slots instead of showing all
-  const deliverySlotsSummary = cartObj.delivery_slots
-    ? {
-        available_slots: cartObj.delivery_slots.length,
-        selected_slot: cartObj.selected_slot || "none",
-        hint: "Use picnic_get_delivery_slots for full slot details",
-      }
-    : undefined
-
   return {
     type: cartObj.type,
     id: cartObj.id,
@@ -75,7 +66,6 @@ function filterCartData(cart: unknown) {
     total_price: cartObj.total_price,
     checkout_total_price: cartObj.checkout_total_price,
     total_savings: cartObj.total_savings,
-    delivery_slots_summary: deliverySlotsSummary,
   }
 }
 
