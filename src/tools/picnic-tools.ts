@@ -1,12 +1,12 @@
 import { z } from "zod"
 import { toolRegistry } from "./registry.js"
-import { getPicnicClient, initializePicnicClient } from "../utils/picnic-client.js"
+import { getImageUrl, getPicnicClient, initializePicnicClient } from "../utils/picnic-client.js"
 
 /**
  * Picnic API tools optimized for LLM consumption
  *
  * Optimizations applied:
- * - Search results are filtered to essential fields only (id, name, price, unit, image_id)
+ * - Search results are filtered to essential fields only (id, name, price, unit, image_url)
  * - Pagination added to search and deliveries tools to prevent context overflow
  * - Cart data is filtered to reduce verbosity while keeping essential information
  * - Default limits set to reasonable values (10 for search, 10 for deliveries)
@@ -105,8 +105,7 @@ toolRegistry.register({
       name: product.name,
       price: product.display_price,
       unit: product.unit_quantity,
-      // Only include image_id if it exists, for potential image retrieval
-      ...(product.image_id && { image_id: product.image_id }),
+      ...(product.image_id && { image_url: getImageUrl(product.image_id) }),
     }))
 
     return {
@@ -227,7 +226,7 @@ toolRegistry.register({
       })
 
       if (args.includeImages && category.image_id) {
-        filtered.image_id = category.image_id
+        filtered.image_url = getImageUrl(category.image_id)
       }
 
       return filtered
@@ -324,7 +323,7 @@ toolRegistry.register({
         type: categoryDetails.type,
         ...(categoryDetails.level && { level: categoryDetails.level }),
         ...(args.includeImages &&
-          categoryDetails.image_id && { image_id: categoryDetails.image_id }),
+          categoryDetails.image_id && { image_url: getImageUrl(categoryDetails.image_id) }),
       }
 
       // Handle items/subcategories
@@ -337,7 +336,7 @@ toolRegistry.register({
               name: item.name,
               type: item.type,
               items_count: item.items ? item.items.length : 0,
-              ...(args.includeImages && item.image_id && { image_id: item.image_id }),
+              ...(args.includeImages && item.image_id && { image_url: getImageUrl(item.image_id) }),
             }
           } else {
             // It's a product
@@ -347,7 +346,7 @@ toolRegistry.register({
               type: item.type,
               price: item.display_price,
               unit: item.unit_quantity,
-              ...(args.includeImages && item.image_id && { image_id: item.image_id }),
+              ...(args.includeImages && item.image_id && { image_url: getImageUrl(item.image_id) }),
             }
           }
         })

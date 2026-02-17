@@ -1,6 +1,12 @@
 import PicnicClient from "picnic-api"
 import { config } from "../config.js"
 
+const PICNIC_IMAGE_BASE = `https://storefront-prod.${(config.PICNIC_COUNTRY_CODE || "NL").toLowerCase()}.picnicinternational.com/static/images`
+
+export function getImageUrl(imageId: string, size: string = "small"): string {
+  return `${PICNIC_IMAGE_BASE}/${imageId}/${size}.png`
+}
+
 // Singleton instance for caching
 let picnicClientInstance: InstanceType<typeof PicnicClient> | null = null
 
