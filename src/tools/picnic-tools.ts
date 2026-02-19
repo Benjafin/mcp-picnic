@@ -32,35 +32,41 @@ function filterCartData(cart: unknown) {
     total_price?: number
     checkout_total_price?: number
     total_savings?: number
-    delivery_slots?: unknown[]
-    selected_slot?: unknown
     [key: string]: unknown
   }
 
-  // Filter items to essential info only
-  const filteredItems = cartObj.items?.map((item: unknown) => {
-    const itemObj = item as {
+  // Cart structure: Order.items = OrderLine[], each OrderLine.items = OrderArticle[]
+  // Flatten to a simple product list with name, price, quantity
+  const filteredItems = (cartObj.items || []).flatMap((orderLine: unknown) => {
+    const line = orderLine as {
       id?: string
-      name?: string
+      items?: unknown[]
       display_price?: number
-      unit_quantity?: string
-      count?: number
       price?: number
       [key: string]: unknown
     }
 
-    return {
-      id: itemObj.id,
-      name: itemObj.name,
-      price: itemObj.display_price || itemObj.price,
-      unit: itemObj.unit_quantity,
-      quantity: itemObj.count,
-    }
+    return (line.items || []).map((article: unknown) => {
+      const art = article as {
+        id?: string
+        name?: string
+        price?: number
+        unit_quantity?: string
+        image_ids?: string[]
+        [key: string]: unknown
+      }
+
+      return {
+        id: art.id,
+        name: art.name,
+        price: art.price,
+        unit: art.unit_quantity,
+        ...(art.image_ids?.[0] && { image_id: art.image_ids[0] }),
+      }
+    })
   })
 
   return {
-    type: cartObj.type,
-    id: cartObj.id,
     items: filteredItems,
     total_count: cartObj.total_count,
     total_price: cartObj.total_price,
@@ -120,6 +126,52 @@ toolRegistry.register({
         hasMore: startIndex + limit < allResults.length,
       },
     }
+  },
+})
+
+// Search multiple products in parallel
+const searchMultiInputSchema = z.object({
+  queries: z
+    .array(
+      z.object({
+        query: z.string().describe("Search query"),
+        limit: z
+          .number()
+          .min(1)
+          .max(20)
+          .default(3)
+          .describe("Max results per query (default: 3)"),
+      })
+    )
+    .min(1)
+    .max(20)
+    .describe("List of searches to perform in parallel"),
+})
+
+toolRegistry.register({
+  name: "picnic_search_multi",
+  description:
+    "Search for multiple products in parallel. Use this instead of multiple picnic_search calls when you need to find several products at once (e.g. recipe ingredients, weekly groceries).",
+  inputSchema: searchMultiInputSchema,
+  handler: async (args) => {
+    await ensureClientInitialized()
+    const client = getPicnicClient()
+
+    const results = await Promise.all(
+      args.queries.map(async ({ query, limit }) => {
+        const allResults = await client.search(query)
+        const filtered = allResults.slice(0, limit || 3).map((product) => ({
+          id: product.id,
+          name: product.name,
+          price: product.display_price,
+          unit: product.unit_quantity,
+          ...(product.image_id && { image_id: product.image_id }),
+        }))
+        return { query, results: filtered, total: allResults.length }
+      })
+    )
+
+    return { searches: results }
   },
 })
 
@@ -456,13 +508,40 @@ toolRegistry.register({
 // Get delivery slots tool
 toolRegistry.register({
   name: "picnic_get_delivery_slots",
-  description: "Get available delivery time slots",
+  description:
+    "Get available delivery time slots. Returns slot_id (required for picnic_set_delivery_slot), window times, and availability.",
   inputSchema: z.object({}),
   handler: async () => {
     await ensureClientInitialized()
-    const client = getPicnicClient()
-    const slots = await client.getDeliverySlots()
-    return slots
+    var client = getPicnicClient()
+    var result = (await client.getDeliverySlots()) as {
+      delivery_slots?: {
+        slot_id?: string
+        window_start?: string
+        window_end?: string
+        cut_off_time?: string
+        is_available?: boolean
+        selected?: boolean
+      }[]
+      selected_slot?: { slot_id?: string }
+    }
+
+    var slots = (result.delivery_slots || [])
+      .filter((s) => s.is_available)
+      .map((s) => ({
+        slot_id: s.slot_id,
+        date: s.window_start?.slice(0, 10),
+        start: s.window_start?.slice(11, 16),
+        end: s.window_end?.slice(11, 16),
+        cut_off: s.cut_off_time?.slice(0, 16)?.replace("T", " "),
+        selected: s.selected || undefined,
+      }))
+
+    return {
+      slots,
+      selected_slot_id: result.selected_slot?.slot_id ?? null,
+      total_available: slots.length,
+    }
   },
 })
 
@@ -878,3 +957,214 @@ toolRegistry.register({
 
 // Note: picnic_debug_search_article diagnostic tool removed - no longer needed
 // since product detail endpoints are confirmed deprecated (GitHub issue #23)
+
+// --- Recipe types and helpers ---
+
+interface RecipeIngredient {
+  selling_unit_id: string
+  name: string
+  ingredient_type: string // CORE | VARIATION | CUPBOARD
+  display_ingredient_quantity: number
+  display_unit_of_measurement: string
+  selling_unit_quantity: number
+  availability_status: string
+}
+
+interface PreparationInstruction {
+  header: string
+  body: string
+  type: string
+}
+
+interface Recipe {
+  recipe_id: string
+  name: string
+  description: string
+  course: string
+  kitchen: string
+  is_vega_vegan: string
+  recipe_type: string
+  default_servings: number
+  minimum_servings: number
+  maximum_servings: number
+  serving_step: number
+  active_preparation_time_in_minutes: number
+  quality_cue: string
+  display_label?: { text: string; text_color: string; background_color: string }
+  ingredients: RecipeIngredient[]
+  preparation_instructions: PreparationInstruction[]
+  images?: { image_id: string; image_type: string }[]
+}
+
+function extractRecipes(obj: unknown): Recipe[] {
+  var recipes: Recipe[] = []
+  function recurse(node: unknown) {
+    if (Array.isArray(node)) {
+      node.forEach(recurse)
+    } else if (node && typeof node === "object") {
+      var rec = node as Record<string, unknown>
+      if (rec.recipe_id && Array.isArray(rec.ingredients)) {
+        recipes.push(rec as unknown as Recipe)
+      } else {
+        Object.values(rec).forEach(recurse)
+      }
+    }
+  }
+  recurse(obj)
+  return recipes
+}
+
+// In-memory cache for recipes (5 minute TTL)
+var recipeCacheData: Recipe[] | null = null
+var recipeCacheTimestamp = 0
+const RECIPE_CACHE_TTL_MS = 5 * 60 * 1000
+
+async function fetchRecipes(): Promise<Recipe[]> {
+  var now = Date.now()
+  if (recipeCacheData && now - recipeCacheTimestamp < RECIPE_CACHE_TTL_MS) {
+    return recipeCacheData
+  }
+
+  await ensureClientInitialized()
+  var client = getPicnicClient()
+  var response = await client.sendRequest("GET", "/pages/meals-planner-root", null, true)
+  var recipes = extractRecipes(response)
+
+  recipeCacheData = recipes
+  recipeCacheTimestamp = now
+  return recipes
+}
+
+// Get recipes tool
+toolRegistry.register({
+  name: "picnic_get_recipes",
+  description: "Browse available recipes from Picnic's meal planner. Returns a compact list of all recipes with basic info.",
+  inputSchema: z.object({}),
+  handler: async () => {
+    var recipes = await fetchRecipes()
+
+    var summaries = recipes.map((r) => ({
+      recipe_id: r.recipe_id,
+      name: r.name,
+      description: r.description,
+      preparation_time_in_minutes: r.active_preparation_time_in_minutes,
+      default_servings: r.default_servings,
+      course: r.course,
+      kitchen: r.kitchen,
+      is_vega_vegan: r.is_vega_vegan,
+      recipe_type: r.recipe_type,
+      quality_cue: r.quality_cue,
+      label: r.display_label?.text,
+      ingredient_count: r.ingredients.length,
+    }))
+
+    return { recipes: summaries, total: summaries.length }
+  },
+})
+
+// Get recipe details tool
+toolRegistry.register({
+  name: "picnic_get_recipe_details",
+  description:
+    "Get full details for a specific recipe including ingredients and preparation steps.",
+  inputSchema: z.object({
+    recipe_id: z.string().describe("The recipe ID to get details for"),
+  }),
+  handler: async (args) => {
+    var recipes = await fetchRecipes()
+    var recipe = recipes.find((r) => r.recipe_id === args.recipe_id)
+
+    if (!recipe) {
+      return { error: `Recipe '${args.recipe_id}' not found`, suggestion: "Use picnic_get_recipes to find valid recipe IDs." }
+    }
+
+    return {
+      recipe_id: recipe.recipe_id,
+      name: recipe.name,
+      description: recipe.description,
+      course: recipe.course,
+      kitchen: recipe.kitchen,
+      is_vega_vegan: recipe.is_vega_vegan,
+      recipe_type: recipe.recipe_type,
+      default_servings: recipe.default_servings,
+      minimum_servings: recipe.minimum_servings,
+      maximum_servings: recipe.maximum_servings,
+      serving_step: recipe.serving_step,
+      preparation_time_in_minutes: recipe.active_preparation_time_in_minutes,
+      quality_cue: recipe.quality_cue,
+      label: recipe.display_label?.text,
+      ingredients: recipe.ingredients.map((i) => ({
+        selling_unit_id: i.selling_unit_id,
+        name: i.name,
+        ingredient_type: i.ingredient_type,
+        quantity: i.display_ingredient_quantity,
+        unit: i.display_unit_of_measurement,
+        selling_unit_quantity: i.selling_unit_quantity,
+        availability: i.availability_status,
+      })),
+      preparation_instructions: recipe.preparation_instructions.map((s) => ({
+        header: s.header,
+        body: s.body,
+        type: s.type,
+      })),
+      images: recipe.images?.map((img) => img.image_id),
+    }
+  },
+})
+
+// Add recipe to cart tool
+toolRegistry.register({
+  name: "picnic_add_recipe_to_cart",
+  description:
+    "Add all ingredients for a recipe to the shopping cart. Scales quantities based on servings. Skips CUPBOARD ingredients (salt, oil, etc.).",
+  inputSchema: z.object({
+    recipe_id: z.string().describe("The recipe ID to add ingredients for"),
+    servings: z
+      .number()
+      .min(1)
+      .optional()
+      .describe("Number of servings (defaults to recipe's default_servings)"),
+  }),
+  handler: async (args) => {
+    var recipes = await fetchRecipes()
+    var recipe = recipes.find((r) => r.recipe_id === args.recipe_id)
+
+    if (!recipe) {
+      return { error: `Recipe '${args.recipe_id}' not found`, suggestion: "Use picnic_get_recipes to find valid recipe IDs." }
+    }
+
+    var servings = args.servings ?? recipe.default_servings
+    var scale = servings / recipe.default_servings
+
+    await ensureClientInitialized()
+    var client = getPicnicClient()
+
+    var added: { name: string; quantity: number }[] = []
+    var skippedCupboard: string[] = []
+    var unavailable: string[] = []
+
+    for (var ingredient of recipe.ingredients) {
+      if (ingredient.ingredient_type === "CUPBOARD") {
+        skippedCupboard.push(ingredient.name)
+        continue
+      }
+
+      if (ingredient.availability_status !== "AVAILABLE") {
+        unavailable.push(ingredient.name)
+        continue
+      }
+
+      var quantity = Math.ceil(ingredient.selling_unit_quantity * scale)
+      await client.addProductToShoppingCart(ingredient.selling_unit_id, quantity)
+      added.push({ name: ingredient.name, quantity })
+    }
+
+    return {
+      recipe_name: recipe.name,
+      servings,
+      added,
+      skipped_cupboard: skippedCupboard,
+      unavailable,
+    }
+  },
+})
