@@ -1168,3 +1168,83 @@ toolRegistry.register({
     }
   },
 })
+
+// Checkout tool — full checkout flow in one call
+toolRegistry.register({
+  name: "picnic_checkout",
+  description:
+    "Checkout and confirm the current shopping cart. A delivery slot MUST be selected first (via picnic_set_delivery_slot). This will place the order and charge the user's payment method.",
+  inputSchema: z.object({}),
+  handler: async () => {
+    await ensureClientInitialized()
+    var client = getPicnicClient()
+
+    // Step 1: Get cart to extract state_token and mts
+    var cart = (await client.getShoppingCart()) as {
+      mts?: number
+      state_token?: string
+      total_count?: number
+      checkout_total_price?: number
+      selected_slot?: { slot_id?: string; window_start?: string; window_end?: string }
+    }
+
+    if (!cart.state_token || !cart.mts) {
+      return { error: "Cart has no state_token or mts — is the cart empty?" }
+    }
+
+    if (!cart.selected_slot?.slot_id) {
+      return {
+        error: "No delivery slot selected. Use picnic_set_delivery_slot first.",
+      }
+    }
+
+    var checkoutBody = {
+      mts: cart.mts,
+      oos_article_ids: {},
+      state_token: cart.state_token,
+    }
+
+    // Step 2: Start checkout
+    var startResult = (await client.sendRequest(
+      "POST",
+      "/cart/checkout/start",
+      checkoutBody
+    )) as { order_id?: string }
+
+    if (!startResult.order_id) {
+      return { error: "Checkout start failed — no order_id returned", details: startResult }
+    }
+
+    var orderId = startResult.order_id
+
+    // Step 3: Initiate payment
+    await client.sendRequest("POST", "/cart/checkout/initiate_payment", {
+      app_return_url: "nl.picnic-supermarkt://payment",
+      order_id: orderId,
+    })
+
+    // Step 4: Confirm order
+    var confirmResult = (await client.sendRequest(
+      "POST",
+      `/cart/checkout/order/${orderId}/confirm`,
+      {}
+    )) as {
+      order_id?: string
+      total_price?: number
+      total_count?: number
+      delivery_slot?: { window_start?: string; window_end?: string }
+    }
+
+    return {
+      order_id: confirmResult.order_id,
+      total_price: confirmResult.total_price,
+      total_count: confirmResult.total_count,
+      delivery_window: confirmResult.delivery_slot
+        ? {
+            start: confirmResult.delivery_slot.window_start?.slice(0, 16)?.replace("T", " "),
+            end: confirmResult.delivery_slot.window_end?.slice(0, 16)?.replace("T", " "),
+          }
+        : null,
+    }
+  },
+})
